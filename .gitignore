@@ -1,0 +1,6 @@
+# Directories to ignore
+data/
+sample_solution/
+
+# OS files
+.DS_Store
