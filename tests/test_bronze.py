@@ -1,10 +1,10 @@
-"""Tests for pipeline.ingest — column schemas, file-date parsing, and row counts."""
+"""Tests for pipeline.bronze — column schemas, file-date parsing, and row counts."""
 
 import datetime
 
 from pyspark.sql.types import DateType, StringType
 
-from pipeline.ingest import ingest_enrollment, ingest_nonfin, ingest_supplfwd
+from pipeline.bronze import ingest_enrollment, ingest_nonfin, ingest_supplfwd
 
 # -- Expected columns (data columns only, excluding _source_file / _file_date) --
 

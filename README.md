@@ -53,16 +53,28 @@ These directories are gitignored. To regenerate them, copy a few files from `dat
 
 ## Running
 
-### Smoke Test
+### Bronze Layer
 
 Verify PySpark can read all three file types:
 
 ```bash
 # Against sample data
-uv run python -m pipeline.smoke_test ./data_sample
+uv run python -m pipeline.run_bronze ./data_sample
 
 # Against full dataset
-uv run python -m pipeline.smoke_test ./data
+uv run python -m pipeline.run_bronze ./data
+```
+
+### Silver Layer
+
+Run the full Bronze → Silver pipeline and display summary stats (delete types, consent breakdown, phone sources, winning record sources):
+
+```bash
+# Against sample data
+uv run python -m pipeline.run_silver ./data_sample
+
+# Against full dataset
+uv run python -m pipeline.run_silver ./data
 ```
 
 ### Unit Tests
@@ -71,19 +83,44 @@ uv run python -m pipeline.smoke_test ./data
 uv run pytest tests/ -v
 ```
 
-Tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require the generated data.
+Tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require the generated data. The Silver test suite covers hard deletes, soft deletes, re-adds after deletion, consent withdrawal, SUPPLFWD vs NON-FIN conflict resolution, and SUPPLFWD-only phones.
+
+## Architecture
+
+### Pipeline Layers
+
+**Bronze (ingestion)** — Read raw gzipped pipe-delimited CSVs into Spark DataFrames with file-date metadata extracted from filenames.
+
+**Silver (reconciliation)** — Reconcile the three sources into one row per `(account_number, phone_number)`:
+- Detect hard deletes (phone absent from latest NON-FIN snapshot)
+- Detect soft deletes (SUPPLFWD `cnsmr_phn_sft_dlt_flg = 'Y'`)
+- Handle re-adds (soft-deleted phone reappearing in a later snapshot)
+- Track consent status from the most recent source
+- Resolve NON-FIN vs SUPPLFWD conflicts (most recent event date wins; SUPPLFWD wins ties)
+- Derive `account_number` from legacy identifier
+
+**Gold (TODO)** — `phone_consent` table and `can_send_sms()` compliance API.
+
+### Key Design Decisions
+
+- **Hard delete detection**: Single `groupBy` + `max(_file_date)` per phone vs global max snapshot date. Avoids expensive pairwise snapshot comparisons.
+- **Merge strategy**: Union NON-FIN and SUPPLFWD into a common schema, then `row_number()` window to pick the most recent record. More efficient than a full outer join.
+- **Account number**: Derived in Silver by stripping the trailing "P" from `cnsmr_idntfr_lgcy_txt`.
 
 ## Project Structure
 
 ```
 pipeline/
   spark_session.py   # SparkSession factory (local mode, Java 17 config)
-  ingest.py          # Bronze layer: read raw files into DataFrames
-  smoke_test.py      # End-to-end ingestion verification
+  bronze.py          # Bronze layer: read raw files into DataFrames
+  silver.py          # Silver layer: reconcile into one row per (account, phone)
+  run_bronze.py      # Bronze pipeline runner
+  run_silver.py      # Silver pipeline runner with summary stats
 tests/
-  conftest.py        # Shared fixtures (SparkSession, sample data generation)
-  test_ingest.py     # Schema, column, type, and file-date parsing tests
+  conftest.py        # Shared fixtures (SparkSession, Bronze + Silver sample data)
+  test_bronze.py     # Bronze schema, column, type, and file-date parsing tests
+  test_silver.py     # Silver dedup, hard/soft deletes, merging, consent, integration
 data/                # Full generated dataset (gitignored)
-data_sample/         # Small gzipped subset for local dev (gitignored)
+data_sample/         # Gzipped subset for local dev (gitignored)
 data_preview/        # Extracted CSVs for manual inspection (gitignored)
 ```

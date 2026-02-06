@@ -1,10 +1,9 @@
-"""Smoke test: verify local PySpark can read all three file types from sample data."""
+"""Run the Bronze layer pipeline locally and display results."""
 
 import sys
-from pathlib import Path
 
 from pipeline.spark_session import get_spark
-from pipeline.ingest import ingest_enrollment, ingest_nonfin, ingest_supplfwd
+from pipeline.bronze import ingest_enrollment, ingest_nonfin, ingest_supplfwd
 
 
 def main(data_dir: str) -> None:
