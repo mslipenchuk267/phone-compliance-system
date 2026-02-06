@@ -36,6 +36,7 @@ def build_phone_consent_table(silver_df: DataFrame) -> DataFrame:
         "is_deleted",
         "delete_type",
         "deleted_at",
+        "_source_file",
     )
 
 

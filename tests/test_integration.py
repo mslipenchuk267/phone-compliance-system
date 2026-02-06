@@ -148,7 +148,7 @@ class TestPipelineEndToEnd:
         gold = build_phone_consent_table(silver)
 
         # Correct column count
-        assert len(gold.columns) == 8
+        assert len(gold.columns) == 9
 
         # No null account numbers
         assert gold.filter(F.col("account_number").isNull()).count() == 0

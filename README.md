@@ -399,17 +399,22 @@ A `Dockerfile` and ECR repository are included in this project. For production w
 
 #### Audit Trail
 
-**Approach**: Delta Change Data Feed (CDF) enabled globally via Terraform `spark_conf`. Records row-level changes (inserts, updates, deletes) for every Delta table automatically. Supports `SELECT * FROM table_changes('table', start_version)` and time travel queries (`SELECT * FROM table VERSION AS OF 5`).
+**Approach**: Two complementary mechanisms provide audit coverage:
+
+1. **File-level lineage (`_source_file`)**: Every row in Bronze, Silver, and Gold carries a `_source_file` column containing the full path of the client file that drove its current state. This is captured at ingestion via Spark's `input_file_name()` and propagated through all layers — when Silver merges NON-FIN, SUPPLFWD, and ENRLMT records, the winning record's `_source_file` is preserved. This directly answers: "this Gold row looks like this because of `MRS_PLACE_20260201.txt`".
+
+2. **Delta Change Data Feed (CDF)**: Enabled globally via Terraform `spark_conf`. Records row-level changes (inserts, updates, deletes) for every Delta table automatically. Supports `SELECT * FROM table_changes('table', start_version)` and time travel queries (`SELECT * FROM table VERSION AS OF 5`).
 
 **Pros**:
-- Effectively free — one Terraform config flag, zero code changes, minimal storage overhead
-- Covers the core compliance question: "what changed and when" for any row in any layer
+- Every Gold row is traceable back to the specific client file that produced it — no re-running the pipeline or querying Bronze manually to debug
+- CDF is effectively free — one Terraform config flag, minimal storage overhead
+- Combined, the two mechanisms answer both "what changed and when" (CDF) and "which file caused it" (`_source_file`)
 - Time travel enables point-in-time auditing (e.g., "what was this account's consent status on March 1st?") and easy rollback of bad writes
 
 **Cons**:
-- CDF tracks _what_ changed but not _why_ — it does not capture which source file or business event triggered a consent withdrawal. Full lineage would require propagating source metadata (filename, row number) through all layers
-- Delta table history is bounded by the retention period (default 30 days for time travel, configurable). Long-term audit requirements need an explicit archival strategy
-- A custom audit log table with business context (source file, change reason, actor) would be richer for compliance reporting, but requires pipeline code changes and additional storage
+- `_source_file` tracks lineage per row, not per column — if a Gold row's `phone_source` came from SUPPLFWD but `consent_flag` was originally set in NON-FIN, only the winning record's file is tracked. Per-column lineage (e.g., a snapshot table mapping `(table.column, row_id) → source_file`) would be richer but significantly more complex to implement and maintain
+- Delta table history is bounded by the retention period (default 30 days for time travel, configurable). Long-term audit requirements need an explicit archival strategy (e.g., archiving CDF output to an append-only table before `VACUUM` runs)
+- `_source_file` captures the file path at read time — if source files are moved or renamed in S3 after processing, the path becomes stale
 
 #### Real-time API
 

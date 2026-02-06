@@ -108,6 +108,7 @@ class TestBuildPhoneConsentTable:
             "is_deleted",
             "delete_type",
             "deleted_at",
+            "_source_file",
         ]
         assert gold.columns == expected
 

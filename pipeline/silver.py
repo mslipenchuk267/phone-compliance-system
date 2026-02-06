@@ -120,6 +120,7 @@ def merge_nonfin_and_supplfwd(
         F.col("_file_date").alias("event_date"),
         F.lit(None).cast("string").alias("soft_delete_flag"),
         F.lit("NON-FIN").alias("record_source"),
+        F.col("_source_file"),
     )
 
     sf = latest_supplfwd.select(
@@ -136,6 +137,7 @@ def merge_nonfin_and_supplfwd(
         F.col("record_date_parsed").alias("event_date"),
         F.col("cnsmr_phn_sft_dlt_flg").alias("soft_delete_flag"),
         F.lit("SUPPLFWD").alias("record_source"),
+        F.col("_source_file"),
     )
 
     combined = nf.unionByName(sf)
@@ -166,6 +168,7 @@ def _normalize_enrollment(enrollment_df: DataFrame) -> DataFrame:
         F.to_date("enrollment_date", "yyyy-MM-dd").alias("event_date"),
         F.lit(None).cast("string").alias("soft_delete_flag"),
         F.lit("ENRLMT").alias("record_source"),
+        F.col("_source_file"),
     )
 
 
@@ -287,4 +290,5 @@ def build_silver_table(
         "deleted_at",
         "record_source",
         "event_date",
+        "_source_file",
     )

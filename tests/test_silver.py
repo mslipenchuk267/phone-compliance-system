@@ -252,6 +252,7 @@ class TestBuildSilverTable:
             "deleted_at",
             "record_source",
             "event_date",
+            "_source_file",
         ]
         assert silver.columns == expected
 
