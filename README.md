@@ -137,7 +137,7 @@ make run-pipeline
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - Java 17 (required by PySpark 3.5 — Java 18+ is not compatible)
 - [uv](https://docs.astral.sh/uv/)
 
