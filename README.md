@@ -24,6 +24,7 @@ A data pipeline that determines whether SMS outreach is permitted for a given ph
   - [Pipeline Logic](#pipeline-logic)
   - [Edge Cases](#edge-cases)
   - [Deployment Tradeoffs](#deployment-tradeoffs)
+  - [Why no Unity Catalog](#why-no-unity-catalog)
   - [Bonus Challenges](#bonus-challenges)
 - [Gold Schema](#gold-schema)
 - [Project Structure](#project-structure)
@@ -301,6 +302,16 @@ tests/sql_tests/
   validate_gold.sql      # 18 queries: normalization, consent, can_send_sms compliance
 ```
 
+**Important: S3 credentials for SQL queries.** The pipeline job cluster receives S3 credentials via `spark_conf` in Terraform, but the SQL Warehouse and SQL Query Editor are separate compute resources that do not inherit those credentials. On the free-trial workspace, custom `spark_conf_pairs` on the SQL Warehouse are silently ignored.
+
+To work around this, the validation queries use the `delta.` path syntax to read directly from S3 without requiring a registered catalog table:
+
+```sql
+SELECT * FROM delta.`s3://ms-phone-compliance-delta/gold/phone_consent` LIMIT 10;
+```
+
+The SQL Warehouse, personal compute cluster, and SQL Query Editor do **not** inherit the S3 credentials from the Terraform-managed job cluster — each is a separate compute resource. Without Unity Catalog, only the pipeline's job cluster (which receives credentials via Terraform `spark_conf`) can access the Delta tables on S3. See [Why no Unity Catalog](#why-no-unity-catalog) for how a catalog would eliminate this limitation.
+
 ---
 
 ## Design Decisions
@@ -356,6 +367,22 @@ Delta Live Tables would be a natural fit for a medallion pipeline — it manages
 - **Time constraints**: Rewriting the pipeline to use DLT's declarative API would require restructuring all three layers and rewriting the test suite against DLT's testing framework (`dlt.test`). The standard PySpark approach allowed faster development while maintaining full test coverage.
 
 For a production system where the pipeline will only run on Databricks, DLT is worth adopting — particularly for its built-in expectations (replacing `data_quality.py`) and automatic dependency resolution between tables.
+
+#### Why no Unity Catalog <a id="why-no-unity-catalog"></a>
+
+Without a catalog, Delta tables are referenced by their raw S3 path (`delta.\`s3://...\``). This works on the job cluster and personal compute cluster (which have S3 credentials via `spark_conf`), but fails on the SQL Warehouse because it's a separate compute resource with no access to those credentials. A Unity Catalog would solve this by registering tables under a governed namespace (e.g., `phone_compliance.gold.phone_consent`) so that any Databricks compute — including the SQL Warehouse and SQL Query Editor — can query them using standard SQL names with centralized access control.
+
+Setting up Unity Catalog would have required:
+
+1. **Create a metastore** — one per Databricks account/region. Requires an S3 bucket for managed table storage and an IAM role for the metastore to access it.
+2. **Create an external location** — register `s3://ms-phone-compliance-delta/` as a trusted storage location with an IAM role that has read/write access to the bucket.
+3. **Create catalog and schema** — `CREATE CATALOG phone_compliance; CREATE SCHEMA phone_compliance.gold;`
+4. **Register tables** — `CREATE TABLE phone_compliance.gold.phone_consent USING DELTA LOCATION 's3://ms-phone-compliance-delta/gold/phone_consent';`
+5. **Grant permissions** — `GRANT SELECT ON TABLE phone_compliance.gold.phone_consent TO ...`
+
+This was not implemented due to time constraints and because Unity Catalog setup involves account-level admin configuration (metastore creation, IAM trust policies) that goes beyond the scope of the pipeline itself. On the free-trial workspace, the metastore IAM role would also hit the same permissions boundary issues encountered with [ECR/Docker](#container-services-docker).
+
+In a production deployment, Unity Catalog + DLT together would be the ideal setup: DLT manages the pipeline and table lifecycle declaratively, while Unity Catalog provides governed, credential-free access to all tables across any compute resource.
 
 #### Single-node cluster
 
