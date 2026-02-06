@@ -4,3 +4,9 @@ sample_solution/
 
 # OS files
 .DS_Store
+
+# Virtual env
+.venv/
+
+# Build files
+*.egg-info/

@@ -1,5 +1,5 @@
 [project]
-name = "coding-challenge"
+name = "phone-compliance-system"
 version = "0.1.0"
 description = "Data Engineering Challenge: Client Phone Consent System"
 requires-python = ">=3.9"
