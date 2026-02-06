@@ -2,13 +2,146 @@
 
 A data pipeline that determines whether SMS outreach is permitted for a given phone number on a customer account. Processes ENRLMT (enrollment), NON-FIN-BDL (account snapshots), and SUPPLFWD (change history) files through a Bronze → Silver → Gold architecture using PySpark.
 
-## Prerequisites
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Pipeline Overview](#pipeline-overview)
+- [Quick Start](#quick-start)
+- [Local Development](#local-development)
+  - [Prerequisites](#prerequisites)
+  - [Setup](#setup)
+  - [Running the Pipeline](#running-the-pipeline)
+  - [Test Data](#test-data)
+  - [Tests](#tests)
+- [Cloud Deployment (Databricks on AWS)](#cloud-deployment-databricks-on-aws)
+  - [Cloud Prerequisites](#cloud-prerequisites)
+  - [AWS IAM Setup](#aws-iam-setup)
+  - [Databricks Setup](#databricks-setup)
+  - [Permissions Created by Terraform](#permissions-created-by-terraform)
+  - [Deployment Steps](#deployment-steps)
+  - [SQL Validation](#sql-validation)
+- [Design Decisions](#design-decisions)
+  - [Pipeline Logic](#pipeline-logic)
+  - [Edge Cases](#edge-cases)
+  - [Deployment Tradeoffs](#deployment-tradeoffs)
+  - [Bonus Challenges](#bonus-challenges)
+- [Gold Schema](#gold-schema)
+- [Project Structure](#project-structure)
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          AWS Account                                │
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐                               │
+│  │ S3: Raw Data │    │ S3: Delta    │                               │
+│  │ ENROLLMENT/  │    │ bronze/      │                               │
+│  │ MAINTENANCE/ │    │ silver/      │                               │
+│  │ (csv.gz)     │    │ gold/        │                               │
+│  └──────┬───────┘    └──────▲───────┘                               │
+│         │                   │                                       │
+│         │            ┌──────┴───────┐                               │
+│         └───────────►│  Databricks  │  Pipeline code on DBFS        │
+│                      │  Single-node │  S3A creds via spark_conf     │
+│                      │  Job         │  Delta Change Data Feed on    │
+│                      │              │                               │
+│                      │ Bronze ──►   │                               │
+│                      │ Silver ──►   │                               │
+│                      │ Gold   ──►   │                               │
+│                      └──────────────┘                               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Table Dependency Graph
+
+```
+  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+  │  S3 Raw Files    │     │  S3 Raw Files    │     │  S3 Raw Files    │
+  │  NON-FIN-BDL     │     │  SUPPLFWD        │     │  ENRLMT          │
+  │  (monthly snap)  │     │  (weekly changes)│     │  (enrollments)   │
+  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
+           │                        │                         │
+           ▼                        ▼                         ▼
+  ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+  │  Bronze: nonfin  │     │ Bronze: supplfwd │     │ Bronze: enrlmt   │
+  │  (Delta)         │     │ (Delta)          │     │ (Delta)          │
+  └────────┬─────────┘     └────────┬─────────┘     └────────┬─────────┘
+           │                        │                         │
+           └────────────┬───────────┘                         │
+                        │                                     │
+                        ▼                                     │
+               ┌──────────────────┐                           │
+               │  Silver:         │◄──────────────────────────┘
+               │  phone_state     │  enrollment-only phones
+               │  (Delta)         │  via left_anti join
+               │                  │
+               │  1 row per       │
+               │  (account,phone) │
+               └────────┬─────────┘
+                        │
+                        ▼
+               ┌──────────────────┐
+               │  Gold:           │
+               │  phone_consent   │
+               │  (Delta, MERGE)  │
+               │                  │
+               │  +1XXXXXXXXXX    │
+               │  can_send_sms()  │
+               └──────────────────┘
+```
+
+---
+
+## Pipeline Overview
+
+| Layer | Input | Output | Key Logic |
+|-------|-------|--------|-----------|
+| **Bronze** | Raw gzipped CSVs from S3 | 3 Delta tables (`nonfin`, `supplfwd`, `enrollment`) | Parse pipe-delimited files, extract `_file_date` from filenames |
+| **Silver** | 3 Bronze Delta tables | 1 Delta table (`phone_state`) | Dedup, hard/soft delete detection, NON-FIN vs SUPPLFWD merge, enrollment fallback → 1 row per `(account, phone)` |
+| **Gold** | Silver `phone_state` | 1 Delta table (`phone_consent`) | Normalize phones to `+1XXXXXXXXXX`, derive `has_sms_consent`, expose `can_send_sms()` compliance API |
+
+### `can_send_sms` Rules
+
+Returns **True** only when all conditions are met:
+1. The `(account_number, phone_number)` row exists in `phone_consent`
+2. `phone_source = 'CLIENT'`
+3. `is_deleted = False`
+4. `has_sms_consent` is `True` or `NULL` (implicit consent allowed)
+
+Returns **False** otherwise (including when no matching row is found).
+
+---
+
+## Quick Start
+
+```bash
+# Local
+uv sync --extra dev
+uv run python generate_sample_data.py
+uv run python -m pipeline.run_gold ./data_sample
+uv run pytest tests/ -v
+
+# Cloud (after AWS/Databricks setup — see Cloud Deployment below)
+make init && make deploy
+make generate-data && make push-data
+make push-code
+make run-pipeline
+```
+
+---
+
+## Local Development
+
+### Prerequisites
 
 - Python 3.12+
 - Java 17 (required by PySpark 3.5 — Java 18+ is not compatible)
 - [uv](https://docs.astral.sh/uv/)
 
-### Java 17 Setup
+#### Java 17 Setup
 
 PySpark 3.5 is incompatible with Java 18+ due to a removed `Subject.getSubject` API. Install Java 17 if you don't have it:
 
@@ -26,87 +159,57 @@ The pipeline auto-detects Corretto 17 at its default install path. If your Java 
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 ```
 
-## Setup
+### Setup
 
 ```bash
 uv sync --extra dev
 ```
 
-## Generate Test Data
+### Running the Pipeline
 
+```bash
+# Bronze — verify PySpark can read all three file types
+uv run python -m pipeline.run_bronze ./data_sample
+
+# Silver — reconcile into one row per (account, phone)
+uv run python -m pipeline.run_silver ./data_sample
+
+# Gold — full pipeline with compliance checks
+uv run python -m pipeline.run_gold ./data_sample
+```
+
+Replace `./data_sample` with `./data` to run against the full 1GB dataset.
+
+### Test Data
+
+**Full dataset** (~1GB compressed, ~5GB uncompressed):
 ```bash
 uv run python generate_bank_data.py --output-dir ./data --target-size-gb 1.0
 ```
 
-This produces ~410 gzipped pipe-delimited CSV files (~1GB compressed) across `data/ENROLLMENT/` and `data/MAINTENANCE/`.
-
-### Sample Data
-
-Generate a small dataset for local development and manual inspection:
-
+**Sample dataset** (~10MB, ~500 accounts):
 ```bash
 uv run python generate_sample_data.py
 ```
-
-This creates two directories (both gitignored):
-- `data_sample/` — small gzipped dataset for PySpark (~500 accounts)
-- `data_preview/` — same files extracted as plain CSV for manual inspection
-
-## Running
-
-### Bronze Layer
-
-Verify PySpark can read all three file types:
-
-```bash
-# Against sample data
-uv run python -m pipeline.run_bronze ./data_sample
-
-# Against full dataset
-uv run python -m pipeline.run_bronze ./data
-```
-
-### Silver Layer
-
-Run the full Bronze → Silver pipeline and display summary stats (delete types, consent breakdown, phone sources, winning record sources):
-
-```bash
-# Against sample data
-uv run python -m pipeline.run_silver ./data_sample
-
-# Against full dataset
-uv run python -m pipeline.run_silver ./data
-```
-
-### Gold Layer
-
-Run the full Bronze → Silver → Gold pipeline, display the `phone_consent` table, and run sample `can_send_sms` compliance checks:
-
-```bash
-# Against sample data
-uv run python -m pipeline.run_gold ./data_sample
-
-# Against full dataset
-uv run python -m pipeline.run_gold ./data
-```
+Creates `data_sample/` (gzipped for PySpark) and `data_preview/` (plain CSV for manual inspection). Both are gitignored.
 
 ### Tests
 
 ```bash
 # Unit + integration (default, ~35s)
-uv run pytest tests/ -v
+make test
+# or: uv run pytest tests/ -v
 
-# E2E with freshly generated data (~60s, generates a small dataset automatically)
+# E2E with freshly generated data (~60s)
 uv run pytest tests/ -v -m "e2e"
 
-# E2E against existing data_sample/ (quick spot-check, pairs with data_preview/)
+# E2E against existing data_sample/
 uv run pytest tests/ -v -m "e2e" --e2e-data=sample
 
 # Everything
-uv run pytest tests/ -v -m ""
+make test-all
+# or: uv run pytest tests/ -v -m ""
 ```
-
-The test suite has three tiers:
 
 | Tier | File | Tests | Default | Description |
 |------|------|------:|---------|-------------|
@@ -117,42 +220,20 @@ The test suite has three tiers:
 | E2E | `test_e2e.py` | 11 | No | Data quality, consistency, business logic at scale |
 | **Total** | | **90** | **79** | |
 
-Unit and integration tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require generated data. E2E tests are excluded by default (`addopts = "-m 'not e2e'"` in `pyproject.toml`) — they generate a fresh dataset via `generate_bank_data.py` or use `data_sample/`.
+Unit and integration tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require generated data. E2E tests are excluded by default (`addopts = "-m 'not e2e'"` in `pyproject.toml`).
+
+---
 
 ## Cloud Deployment (Databricks on AWS)
 
-### Architecture
-
-```
-┌───────────────────────────────────────────────────────────┐
-│                     AWS Account                           │
-│                                                           │
-│  ┌──────────────┐    ┌──────────────┐                     │
-│  │ S3: Raw Data │    │ S3: Delta    │                     │
-│  │ ENROLLMENT/  │    │ bronze/      │                     │
-│  │ MAINTENANCE/ │    │ silver/      │                     │
-│  │ (csv.gz)     │    │ gold/        │                     │
-│  └──────┬───────┘    └──────▲───────┘                     │
-│         │                   │                             │
-│         │            ┌──────┴───────┐                     │
-│         └───────────►│  Databricks  │                     │
-│                      │  Multi-task  │                     │
-│                      │  Job         │                     │
-│                      │              │                     │
-│                      │ Bronze ──►   │  Pipeline code      │
-│                      │ Silver ──►   │  stored on DBFS     │
-│                      │ Gold   ──►   │                     │
-│                      └──────────────┘                     │
-└───────────────────────────────────────────────────────────┘
-```
-
-S3 access is configured via Hadoop S3A credentials passed through the cluster's `spark_conf`. The Databricks cross-account role is granted an inline S3 policy by Terraform for bucket access.
-
-### Prerequisites
+### Cloud Prerequisites
 
 - AWS CLI configured with credentials
 - Terraform >= 1.5
-- Databricks CLI configured (for DBFS uploads via `make push-code`)
+- Databricks CLI configured (for DBFS uploads via `make push-code`). Must be on your `PATH` for `make` targets — if installed via `pip3`, you may need:
+  ```bash
+  export PATH="/Library/Frameworks/Python.framework/Versions/3.13/bin:$PATH"  # macOS pip3 default
+  ```
 - An existing Databricks workspace on AWS
 
 ### AWS IAM Setup
@@ -173,15 +254,13 @@ Create a dedicated IAM user for deployment (do not use root):
 
 ### Permissions Created by Terraform
 
-Terraform manages these IAM resources:
-
 | Resource | Purpose |
 |----------|---------|
 | **S3 buckets** (x2) | Raw data bucket + Delta Lake bucket (versioning enabled on Delta) |
 | **S3 access policy** on `databricks-compute-role-*` | Grants the Databricks cross-account role `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` on both buckets |
-| **ECR repository** | Container registry (provisioned for future use with Databricks Container Services) |
+| **ECR repository** | Container registry (provisioned for Docker-based deployment — see [Container Services note](#container-services-docker) below) |
 
-The Databricks job cluster also receives AWS credentials via `spark.hadoop.fs.s3a.*` spark conf so that Spark can read/write S3 directly. These are the same credentials used for `aws configure`.
+The Databricks job cluster receives AWS credentials via `spark.hadoop.fs.s3a.*` spark conf so that Spark can read/write S3 directly. These are the same credentials used for `aws configure`.
 
 > **Note**: On Databricks free-trial workspaces, instance profiles are blocked by a permissions boundary on the cross-account role (`iam:PassRole` is denied). The S3A credentials approach works around this. For production deployments, replace with instance profiles or Unity Catalog storage credentials.
 
@@ -197,7 +276,7 @@ cp infra/terraform.tfvars.example infra/terraform.tfvars
 #   - databricks_cross_account_role_name (e.g., "databricks-compute-role-7474649069652795")
 #   - aws_access_key_id, aws_secret_access_key (for cluster S3 access)
 
-# 2. Deploy infrastructure (S3, IAM policy, Databricks job)
+# 2. Deploy infrastructure (S3, ECR, IAM policy, Databricks job)
 make init && make deploy
 
 # 3. Generate and upload data
@@ -222,45 +301,11 @@ tests/sql_tests/
   validate_gold.sql      # 18 queries: normalization, consent, can_send_sms compliance
 ```
 
-### Assumptions
-
-- The interviewer has an existing Databricks workspace on AWS. Terraform creates resources *within* it (jobs, clusters) plus AWS resources (S3, IAM policy) — it does not create the workspace itself.
-- S3 bucket names are configurable via `infra/variables.tf`.
-- The job cluster uses the standard Databricks runtime (14.3 LTS). Pipeline code is uploaded to DBFS and does not require Docker or custom containers.
-- S3 credentials are passed to the cluster via `spark.hadoop.fs.s3a.*` conf. For production, these should be replaced with instance profiles or Unity Catalog storage credentials.
-
-### Bonus Challenges
-
-| Challenge | How Addressed |
-|-----------|---------------|
-| **Incremental Processing** | Gold cloud entrypoint uses Delta Lake MERGE (upsert by `account_number + phone_number`) instead of full overwrite. |
-| **Data Quality Monitoring** | `pipeline/data_quality.py` runs checks after each layer (null counts, uniqueness, format validation). Results logged; failures optionally halt the job. |
-| **Audit Trail** | Delta Change Data Feed enabled globally via Terraform `spark_conf`. Supports `SELECT * FROM table_changes(...)` and time travel queries. |
-| **Real-time API** | Gold Delta table queryable via Databricks SQL Warehouse (<5s). For sub-100ms, a DynamoDB + Lambda layer could be added (documented stretch goal). |
-
 ---
 
-## Local Development
+## Design Decisions
 
-### Pipeline Layers
-
-**Bronze (ingestion)** — Read raw gzipped pipe-delimited CSVs into Spark DataFrames with file-date metadata extracted from filenames.
-
-**Silver (reconciliation)** — Reconcile the three sources into one row per `(account_number, phone_number)`:
-- Detect hard deletes (phone absent from latest NON-FIN snapshot)
-- Detect soft deletes (SUPPLFWD `cnsmr_phn_sft_dlt_flg = 'Y'`)
-- Handle re-adds (soft-deleted phone reappearing in a later snapshot)
-- Track consent status from the most recent source
-- Resolve NON-FIN vs SUPPLFWD conflicts (most recent event date wins; SUPPLFWD wins ties)
-- Include enrollment-only phones (phones in ENRLMT but never in NON-FIN or SUPPLFWD)
-- Derive `account_number` from legacy identifier
-
-**Gold (compliance)** — Transform Silver output into the final `phone_consent` table:
-- Normalize phone numbers to `+1XXXXXXXXXX` format
-- Convert consent flags (`Y`/`N`/NULL) to boolean `has_sms_consent`
-- Expose `can_send_sms(account, phone)` compliance API (returns `True` only for CLIENT-sourced, non-deleted phones with consent not withdrawn)
-
-### Key Design Decisions
+### Pipeline Logic
 
 - **Hard delete detection**: Single `groupBy` + `max(_file_date)` per phone vs global max snapshot date. Avoids expensive pairwise snapshot comparisons.
 - **Merge strategy**: Union NON-FIN and SUPPLFWD into a common schema, then `row_number()` window to pick the most recent record. More efficient than a full outer join.
@@ -269,7 +314,7 @@ tests/sql_tests/
 - **Implicit consent**: `can_send_sms` treats NULL consent as permissive (implicit consent allowed) per business rules. Only an explicit `N` (consent withdrawn) blocks SMS outreach.
 - **Account-phone independence**: Each `(account_number, phone_number)` pair is evaluated independently. The same phone number on different accounts can have different deletion and consent states.
 
-### Edge Cases Handled
+### Edge Cases
 
 | Edge Case | Approach |
 |-----------|----------|
@@ -281,7 +326,110 @@ tests/sql_tests/
 | Duplicate records in same file | Deduplicated by `phone_id` (NON-FIN) or `(legacy_id, phone, record_date)` (SUPPLFWD) |
 | Enrollment-only phones | Included in Silver/Gold if never seen in NON-FIN or SUPPLFWD |
 
-### Gold Schema (`phone_consent` table)
+### Deployment Tradeoffs
+
+#### Current approach
+
+Infrastructure and pipeline code are deployed together through a single Terraform configuration + DBFS upload:
+
+- **Terraform** manages all resources: AWS (S3 buckets, ECR, IAM policy) and Databricks (job definition, cluster config)
+- **`make push-code`** uploads pipeline Python files to DBFS via the Databricks CLI
+- Cloud entrypoints use `sys.path.insert(0, "/dbfs/phone-compliance")` so that `from pipeline.bronze import ...` resolves against the DBFS-uploaded code
+
+This works reliably on free-trial workspaces but has drawbacks: DBFS file uploads are not versioned, there is no dependency management on the cluster (the pipeline relies on packages pre-installed in the Databricks runtime), and Terraform manages both AWS infrastructure and Databricks job config in a single state file.
+
+#### Recommended production approach
+
+Split responsibilities between two tools:
+
+- **Terraform** for AWS infrastructure only (S3 buckets, IAM policies, ECR) — resources that change infrequently
+- **Databricks Asset Bundles (DAB)** for pipeline code and Databricks job definitions — resources that change with every code push
+
+Asset Bundles handle code packaging, dependency installation, workspace file sync, and job configuration in a single `databricks.yml`. They version pipeline code alongside job definitions, support CI/CD natively, and eliminate the need for DBFS path hacks or manual `databricks fs cp` uploads. This is the Databricks-recommended pattern for production workflows.
+
+#### Why not Delta Live Tables (DLT)?
+
+Delta Live Tables would be a natural fit for a medallion pipeline — it manages table dependencies declaratively, handles retries, and provides built-in data quality expectations. However, DLT was intentionally not used here:
+
+- **Testing parity**: The pipeline is designed to run identically on local PySpark and on Databricks. All 90 tests run locally against the same `bronze.py`, `silver.py`, and `gold.py` modules that execute in the cloud. DLT's `@dlt.table` decorator API is Databricks-only and cannot be tested with a local SparkSession, which would break this parity.
+- **Portability**: Standard PySpark code can be developed and debugged locally without a Databricks workspace, which reduces iteration time significantly. DLT requires a running Databricks cluster for any execution, even during development.
+- **Time constraints**: Rewriting the pipeline to use DLT's declarative API would require restructuring all three layers and rewriting the test suite against DLT's testing framework (`dlt.test`). The standard PySpark approach allowed faster development while maintaining full test coverage.
+
+For a production system where the pipeline will only run on Databricks, DLT is worth adopting — particularly for its built-in expectations (replacing `data_quality.py`) and automatic dependency resolution between tables.
+
+#### Why ECR / Docker is not used <a id="container-services-docker"></a>
+
+A Docker-based deployment (custom image from ECR via Databricks Container Services) was attempted but encountered multiple blockers on the free-trial workspace:
+
+1. **Container Services disabled by default** — The `enableDcs` workspace setting is not exposed in the admin UI. It can be toggled via the REST API (`PATCH /api/2.0/workspace-conf`), but the feature remained unreliable on the free trial.
+2. **ECR authentication blocked** — The cross-account role's permissions boundary blocks `ecr:*` actions, so the cluster cannot natively pull from a private ECR repository. A workaround using a temporary ECR authorization token via `docker_image.basic_auth` in Terraform resolved the auth error, but the token expires every 12 hours.
+3. **Container creation failure** — After resolving authentication, the cluster failed with `DOCKER_CONTAINER_CREATION_EXCEPTION`. Databricks Container Services requires that custom images do not set an `ENTRYPOINT` (Databricks manages the entrypoint to initialize Spark). After fixing the Dockerfile, the container still failed to create on the free-trial environment.
+
+A `Dockerfile` and ECR repository are included in this project. For production workspaces with Container Services enabled and proper instance profiles, the `docker_image` block can be added back to `databricks.tf` and the `Makefile` targets (`make build`, `make push-image`) are ready to use.
+
+### Bonus Challenges
+
+#### Incremental Processing
+
+**Approach**: The Gold cloud entrypoint uses Delta Lake `MERGE` (upsert by `account_number + phone_number`) instead of full overwrite. Bronze and Silver use overwrite since they reprocess from source.
+
+**Pros**:
+- Gold MERGE is the highest-value target — downstream consumers query this table, and upserting avoids rewriting millions of rows when only a fraction change
+- Delta Lake MERGE is ACID-compliant — concurrent readers always see a consistent snapshot, even mid-write
+- Natural fit for daily runs: new source files flow through Bronze/Silver, and only changed `(account, phone)` pairs are touched in Gold
+
+**Cons**:
+- Bronze and Silver are still full-reprocess — Silver must consider all NON-FIN snapshots to detect hard deletes, so making it truly incremental would require tracking processed snapshots and recalculating only affected accounts (significant complexity)
+- MERGE performance degrades as the Gold table grows into the billions; at that scale, partitioning by `account_number` prefix or Z-ordering would be needed
+- An alternative — Auto Loader (Structured Streaming on S3) — would handle incremental file discovery natively and is worth considering since source files arrive daily. However, Silver's hard-delete detection requires comparing against _all_ NON-FIN snapshots (not just the new one), which limits the benefit of streaming ingestion. Auto Loader would reduce Bronze latency but the Silver full-reconciliation bottleneck remains
+
+#### Data Quality Monitoring
+
+**Approach**: `pipeline/data_quality.py` runs checks after each layer — null counts on key columns, uniqueness validation, format checks (phone number patterns, account number length), and row count sanity. Results are logged; failures halt the job.
+
+**Pros**:
+- Zero external dependencies — checks are pure PySpark, no additional frameworks to install or configure
+- Self-contained pipeline: quality gates ship with the same code as the transforms, so they stay in sync as schemas evolve
+- Fail-fast behavior: a failing check halts the job before downstream layers process bad data
+
+**Cons**:
+- No historical dashboard — check results are logged to stdout, not persisted to a metrics table. Trend detection (e.g., "null rate spiking over the past week") requires parsing logs
+- Checks run after writes, not before — bad data can land in Delta before being flagged. Gating writes on checks would add latency and complicate retry logic
+- A dedicated framework (Great Expectations, Deequ, or Databricks built-in expectations) would provide richer features out of the box: data profiling, anomaly detection, Slack/PagerDuty alerting. Worth adopting if this pipeline grows to support SLAs
+
+#### Audit Trail
+
+**Approach**: Delta Change Data Feed (CDF) enabled globally via Terraform `spark_conf`. Records row-level changes (inserts, updates, deletes) for every Delta table automatically. Supports `SELECT * FROM table_changes('table', start_version)` and time travel queries (`SELECT * FROM table VERSION AS OF 5`).
+
+**Pros**:
+- Effectively free — one Terraform config flag, zero code changes, minimal storage overhead
+- Covers the core compliance question: "what changed and when" for any row in any layer
+- Time travel enables point-in-time auditing (e.g., "what was this account's consent status on March 1st?") and easy rollback of bad writes
+
+**Cons**:
+- CDF tracks _what_ changed but not _why_ — it does not capture which source file or business event triggered a consent withdrawal. Full lineage would require propagating source metadata (filename, row number) through all layers
+- Delta table history is bounded by the retention period (default 30 days for time travel, configurable). Long-term audit requirements need an explicit archival strategy
+- A custom audit log table with business context (source file, change reason, actor) would be richer for compliance reporting, but requires pipeline code changes and additional storage
+
+#### Real-time API
+
+**Approach**: The Gold Delta table is queryable via Databricks SQL Warehouse, meeting the <5s query requirement. For sub-100ms lookups, a DynamoDB + Lambda serving layer is the documented stretch goal.
+
+**Pros**:
+- Zero additional infrastructure — queries run directly against the Gold Delta table with no sync pipelines or caches to maintain
+- SQL Warehouse warm queries return in <2s, sufficient for batch compliance checks and internal dashboards
+- Natural upgrade path: DynamoDB serving layer can be added later without changing the pipeline — Gold Delta remains the source of truth
+
+**Cons**:
+- SQL Warehouse cold-start latency is 5-10s (serverless warehouse spin-up), which is unacceptable for customer-facing API calls
+- Not viable for sub-100ms SLAs — a DynamoDB + Lambda serving layer would be needed, introducing a CDC sync pipeline (Delta CDF to DynamoDB via Lambda or Kinesis), new failure modes, consistency lag, and additional AWS costs
+- An alternative serving option — Redis/ElastiCache — would offer sub-millisecond lookups but adds cache invalidation complexity and lacks DynamoDB's built-in durability. DynamoDB was chosen as the target design because the access pattern is a simple key-value lookup (`account_number + phone_number` to `can_send_sms`)
+
+---
+
+## Gold Schema
+
+### `phone_consent` table
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -294,15 +442,7 @@ tests/sql_tests/
 | `delete_type` | string | `hard_delete`, `soft_delete`, or `NULL` |
 | `deleted_at` | date | When the deletion occurred |
 
-### `can_send_sms` Rules
-
-Returns **True** only when all conditions are met:
-1. The `(account_number, phone_number)` row exists in `phone_consent`
-2. `phone_source = 'CLIENT'`
-3. `is_deleted = False`
-4. `has_sms_consent` is `True` or `NULL` (implicit consent allowed)
-
-Returns **False** otherwise (including when no matching row is found).
+---
 
 ## Project Structure
 
@@ -337,11 +477,11 @@ infra/
   s3.tf                    # Raw data + Delta Lake buckets (versioning on Delta)
   ecr.tf                   # ECR repository
   iam.tf                   # S3 access policy on Databricks cross-account role
-  databricks.tf            # Multi-task job: Bronze → Silver → Gold with S3A credentials
+  databricks.tf            # Single-node multi-task job: Bronze → Silver → Gold with S3A credentials
   outputs.tf               # Bucket names, ECR URL, job ID
   terraform.tfvars.example # Example configuration
 Makefile                   # push-data, build, push-image, deploy, run-pipeline, test
-Dockerfile                 # Databricks-compatible image (optional, for Container Services)
+Dockerfile                 # Databricks Container Services image (not used on free trial — see above)
 generate_bank_data.py      # Full dataset generator (configurable size/seed)
 generate_sample_data.py    # Sample data + preview generator for local dev
 ```

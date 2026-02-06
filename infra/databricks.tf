@@ -8,7 +8,7 @@ resource "databricks_job" "phone_compliance_pipeline" {
     new_cluster {
       spark_version = var.spark_version
       node_type_id  = var.node_type_id
-      num_workers   = var.num_workers
+      num_workers   = 0
 
       aws_attributes {
         availability = "SPOT_WITH_FALLBACK"
@@ -20,6 +20,12 @@ resource "databricks_job" "phone_compliance_pipeline" {
         "spark.databricks.delta.properties.defaults.enableChangeDataFeed" = "true"
         "spark.hadoop.fs.s3a.access.key"                                 = var.aws_access_key_id
         "spark.hadoop.fs.s3a.secret.key"                                 = var.aws_secret_access_key
+        "spark.databricks.cluster.profile"                               = "singleNode"
+        "spark.master"                                                   = "local[*, 4]"
+      }
+
+      custom_tags = {
+        "ResourceClass" = "SingleNode"
       }
     }
   }

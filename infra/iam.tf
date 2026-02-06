@@ -1,7 +1,7 @@
-# ── Grant Databricks cross-account role direct S3 access ─────────────────────
+# ── Grant Databricks cross-account role direct S3 + ECR access ───────────────
 
 resource "aws_iam_role_policy" "databricks_s3_access" {
-  name = "phone-compliance-s3-access"
+  name = "phone-compliance-s3-ecr-access"
   role = var.databricks_cross_account_role_name
 
   policy = jsonencode({
@@ -21,6 +21,22 @@ resource "aws_iam_role_policy" "databricks_s3_access" {
           aws_s3_bucket.delta.arn,
           "${aws_s3_bucket.delta.arn}/*",
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchCheckLayerAvailability",
+        ]
+        Resource = aws_ecr_repository.pipeline.arn
       }
     ]
   })
