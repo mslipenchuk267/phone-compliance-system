@@ -1,0 +1,12 @@
+aws_region            = "us-east-1"
+s3_data_bucket_name   = "my-phone-compliance-data"
+s3_delta_bucket_name  = "my-phone-compliance-delta"
+ecr_repository_name   = "phone-compliance-pipeline"
+databricks_host                    = "https://dbc-xxxxx.cloud.databricks.com"
+databricks_token                   = "dapi..."
+databricks_cross_account_role_name = "databricks-compute-role-XXXXX"
+aws_access_key_id                  = "AKIA..."
+aws_secret_access_key              = "..."
+spark_version                      = "14.3.x-scala2.12"
+node_type_id                       = "i3.xlarge"
+num_workers                        = 2

@@ -1,7 +1,5 @@
 """Bronze layer ingestion: read raw gzipped pipe-delimited files into Spark DataFrames."""
 
-from pathlib import Path
-
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import input_file_name, regexp_extract, to_date
 
@@ -30,20 +28,20 @@ def _extract_file_date(df: DataFrame) -> DataFrame:
 
 def ingest_enrollment(spark: SparkSession, data_dir: str) -> DataFrame:
     """Ingest ENRLMT files from the ENROLLMENT directory."""
-    path = str(Path(data_dir) / "ENROLLMENT" / "*ENRLMT*.csv.gz")
+    path = f"{data_dir.rstrip('/')}/ENROLLMENT/*ENRLMT*.csv.gz"
     df = _read_pipe_csv(spark, path)
     return _extract_file_date(df)
 
 
 def ingest_nonfin(spark: SparkSession, data_dir: str) -> DataFrame:
     """Ingest NON-FIN-BDL files from the MAINTENANCE directory."""
-    path = str(Path(data_dir) / "MAINTENANCE" / "*NON-FIN-BDL*.csv.gz")
+    path = f"{data_dir.rstrip('/')}/MAINTENANCE/*NON-FIN-BDL*.csv.gz"
     df = _read_pipe_csv(spark, path)
     return _extract_file_date(df)
 
 
 def ingest_supplfwd(spark: SparkSession, data_dir: str) -> DataFrame:
     """Ingest SUPPLFWD files from the MAINTENANCE directory."""
-    path = str(Path(data_dir) / "MAINTENANCE" / "*SUPPLFWD*.csv.gz")
+    path = f"{data_dir.rstrip('/')}/MAINTENANCE/*SUPPLFWD*.csv.gz"
     df = _read_pipe_csv(spark, path)
     return _extract_file_date(df)

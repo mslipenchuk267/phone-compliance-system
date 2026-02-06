@@ -1,0 +1,13 @@
+.venv/
+.git/
+.github/
+.claude/
+.pytest_cache/
+__pycache__/
+data/
+data_sample/
+data_preview/
+infra/.terraform/
+infra/*.tfstate*
+tests/
+*.egg-info/

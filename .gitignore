@@ -14,5 +14,12 @@ sample_solution/
 *.egg-info/
 *__pycache__/
 
+# Terraform
+infra/.terraform/
+infra/*.tfstate*
+infra/.terraform.lock.hcl
+*.tfvars
+!infra/terraform.tfvars.example
+
 # Claude
 .claude/

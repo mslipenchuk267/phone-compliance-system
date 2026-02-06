@@ -9,6 +9,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+cloud = ["delta-spark>=3.1"]
 
 [tool.setuptools.packages.find]
 include = ["pipeline*", "tests*"]
