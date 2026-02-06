@@ -3,6 +3,7 @@
 import datetime
 import gzip
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,7 @@ def silver_sample_data_dir(tmp_path):
       Account A (1111111111111111P) — 2 phones
         A1 (5551111111): In snapshots 1,2 but NOT 3 → hard delete
         A2 (5552222222): In all 3 snapshots; consent Y→N → consent withdrawal
+          Snapshot 1 has a DUPLICATE row (same phn_id, different consent_dt) to test dedup
 
       Account B (2222222222222222P) — 1 phone
         B1 (5553333333): In all 3 snapshots; SUPPLFWD soft-delete AFTER snapshot 3 → soft delete
@@ -149,12 +151,18 @@ def silver_sample_data_dir(tmp_path):
 
       Account D (4444444444444444P) — 1 phone
         D1 (5555555555): Only in SUPPLFWD, never in NON-FIN → not deleted, SUPPLFWD source
+          SUPPLFWD has a DUPLICATE row (same key, different hist_id) to test dedup
 
       Account E (5555555555555555P) — 1 phone
         E1 (5556666666): Only in ENRLMT, never in NON-FIN or SUPPLFWD → enrollment-only
 
       Account F (6666666666666666P) — 1 phone
         F1 (5554444444): Same phone as C1 but different account; in snapshots 1,2 NOT 3 → hard delete
+
+      Account G (7777777777777777P) — 1 phone
+        G1 (5557777777): In NON-FIN snapshot 3 AND SUPPLFWD with SAME date (2019-03-01)
+          NON-FIN: source=CONSUMER, consent=Y
+          SUPPLFWD: source=CLIENT, consent=N → SUPPLFWD wins tie
     """
     maint = tmp_path / "MAINTENANCE"
     enrl = tmp_path / "ENROLLMENT"
@@ -168,6 +176,8 @@ def silver_sample_data_dir(tmp_path):
             "aaa1-0001|1111111111111111P|AGN000001|111111111|Alice|Smith|5551111111|CELL|ACTIVE|CLIENT|WIRELESS|90||",
             # A2 — present, consent=Y
             "aaa2-0001|1111111111111111P|AGN000001|111111111|Alice|Smith|5552222222|HOME|ACTIVE|CLIENT|LANDLINE|80|Y|2019-01-01",
+            # A2 — DUPLICATE (same phn_id + file_date, different consent_dt) to test dedup
+            "aaa2-0001|1111111111111111P|AGN000001|111111111|Alice|Smith|5552222222|HOME|ACTIVE|CLIENT|LANDLINE|80|Y|2019-01-10",
             # B1 — present
             "bbb1-0001|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|ACTIVE|THIRD_PARTY|WIRELESS|70||",
             # C1 — present (will be soft-deleted then re-added)
@@ -206,6 +216,8 @@ def silver_sample_data_dir(tmp_path):
             "bbb1-0001|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|ACTIVE|THIRD_PARTY|WIRELESS|70||",
             # C1 — re-appears after soft-delete
             "ccc1-0001|3333333333333333P|AGN000003|333333333|Carol|Davis|5554444444|WORK|ACTIVE|CLIENT|VOIP|60||",
+            # G1 — same date as SUPPLFWD record (tie-breaking: SUPPLFWD should win)
+            "ggg1-0001|7777777777777777P|AGN000007|777777777|Grace|Lee|5557777777|CELL|ACTIVE|CONSUMER|WIRELESS|75|Y|2019-03-01",
         ],
     )
 
@@ -230,6 +242,10 @@ def silver_sample_data_dir(tmp_path):
             "sf-bbb1-01|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|ACTIVE|THIRD_PARTY|WIRELESS|70|||Y|2019-04-01",
             # D1 only in SUPPLFWD, active, consent Y
             "sf-ddd1-01|4444444444444444P|AGN000004|444444444|Dan|Wilson|5555555555|CELL|ACTIVE|CLIENT|WIRELESS|95|Y|2019-03-01|N|2019-04-01",
+            # D1 — DUPLICATE (same legacy_id + phone + record_date, different hist_id) to test dedup
+            "sf-ddd1-02|4444444444444444P|AGN000004|444444444|Dan|Wilson|5555555555|CELL|ACTIVE|CLIENT|WIRELESS|90|N|2019-03-01|N|2019-04-01",
+            # G1 — same date as NON-FIN snapshot 3 (SUPPLFWD should win tie): source=CLIENT, consent=N
+            "sf-ggg1-01|7777777777777777P|AGN000007|777777777|Grace|Lee|5557777777|CELL|ACTIVE|CLIENT|WIRELESS|75|N|2019-03-01|N|2019-03-01",
         ],
     )
 
@@ -244,7 +260,47 @@ def silver_sample_data_dir(tmp_path):
             "4444444444444444|4444444444444444P|AGN000004|444444444|Dan|Wilson|5555555555|CELL|WIRELESS|ACTIVE|CLIENT|95|2019-01-01",
             "5555555555555555|5555555555555555P|AGN000005|555555555|Emily|Brown|5556666666|CELL|WIRELESS|ACTIVE|CLIENT|88|2019-01-01",
             "6666666666666666|6666666666666666P|AGN000006|666666666|Eve|Taylor|5554444444|HOME|LANDLINE|ACTIVE|OTHER|50|2019-01-01",
+            "7777777777777777|7777777777777777P|AGN000007|777777777|Grace|Lee|5557777777|CELL|WIRELESS|ACTIVE|CONSUMER|75|2019-01-01",
         ],
     )
 
     return tmp_path
+
+
+# ---------------------------------------------------------------------------
+# E2E data source option
+# ---------------------------------------------------------------------------
+
+_PROJECT_ROOT = Path(__file__).parent.parent
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--e2e-data",
+        default="generate",
+        choices=["generate", "sample"],
+        help="E2E data source: 'generate' (fresh via generate_bank_data.py) or 'sample' (data_sample/)",
+    )
+
+
+@pytest.fixture(scope="module")
+def e2e_data_dir(request, tmp_path_factory):
+    """Provide a data directory for E2E tests.
+
+    --e2e-data=generate (default): generate a small dataset into a temp directory.
+    --e2e-data=sample: use the existing data_sample/ directory on disk.
+    """
+    mode = request.config.getoption("--e2e-data")
+    if mode == "sample":
+        path = _PROJECT_ROOT / "data_sample"
+        if not path.is_dir():
+            pytest.skip("data_sample/ not found (gitignored, generate locally)")
+        return str(path)
+
+    # Import the generator and create a small dataset
+    sys.path.insert(0, str(_PROJECT_ROOT))
+    from generate_bank_data import generate_dataset
+
+    out = tmp_path_factory.mktemp("e2e_generated")
+    generate_dataset(str(out), target_size_gb=0.05, seed=42)
+    return str(out)

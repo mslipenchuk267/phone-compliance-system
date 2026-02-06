@@ -42,14 +42,15 @@ This produces ~410 gzipped pipe-delimited CSV files (~1GB compressed) across `da
 
 ### Sample Data
 
-To work with a smaller subset locally:
+Generate a small dataset for local development and manual inspection:
 
 ```bash
-# data_sample/ — small gzipped subset for PySpark
-# data_preview/ — same files extracted as plain CSV for manual inspection
+uv run python generate_sample_data.py
 ```
 
-These directories are gitignored. To regenerate them, copy a few files from `data/` and extract with `gzcat`.
+This creates two directories (both gitignored):
+- `data_sample/` — small gzipped dataset for PySpark (~500 accounts)
+- `data_preview/` — same files extracted as plain CSV for manual inspection
 
 ## Running
 
@@ -89,13 +90,34 @@ uv run python -m pipeline.run_gold ./data_sample
 uv run python -m pipeline.run_gold ./data
 ```
 
-### Unit Tests
+### Tests
 
 ```bash
+# Unit + integration (default, ~35s)
 uv run pytest tests/ -v
+
+# E2E with freshly generated data (~60s, generates a small dataset automatically)
+uv run pytest tests/ -v -m "e2e"
+
+# E2E against existing data_sample/ (quick spot-check, pairs with data_preview/)
+uv run pytest tests/ -v -m "e2e" --e2e-data=sample
+
+# Everything
+uv run pytest tests/ -v -m ""
 ```
 
-Tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require the generated data. The test suite covers Bronze ingestion (14 tests), Silver reconciliation (31 tests), and Gold compliance logic (21 tests) — 66 tests total.
+The test suite has three tiers:
+
+| Tier | File | Tests | Default | Description |
+|------|------|------:|---------|-------------|
+| Unit | `test_bronze.py` | 14 | Yes | Schema, columns, types, file-date parsing |
+| Unit | `test_silver.py` | 32 | Yes | Dedup, deletes, merging, enrollment, tie-breaking |
+| Unit | `test_gold.py` | 25 | Yes | Normalization, consent, `can_send_sms` compliance |
+| Integration | `test_integration.py` | 8 | Yes | Cross-layer contracts, idempotency, full pipeline |
+| E2E | `test_e2e.py` | 11 | No | Data quality, consistency, business logic at scale |
+| **Total** | | **90** | **79** | |
+
+Unit and integration tests use self-contained fixtures (tiny gzipped CSVs written to temp directories) and don't require generated data. E2E tests are excluded by default (`addopts = "-m 'not e2e'"` in `pyproject.toml`) — they generate a fresh dataset via `generate_bank_data.py` or use `data_sample/`.
 
 ## Architecture
 
@@ -165,19 +187,23 @@ Returns **False** otherwise (including when no matching row is found).
 
 ```
 pipeline/
-  spark_session.py   # SparkSession factory (local mode, Java 17 config)
-  bronze.py          # Bronze layer: read raw files into DataFrames
-  silver.py          # Silver layer: reconcile into one row per (account, phone)
-  gold.py            # Gold layer: phone_consent table and can_send_sms API
-  run_bronze.py      # Bronze pipeline runner
-  run_silver.py      # Silver pipeline runner with summary stats
-  run_gold.py        # Gold pipeline runner with compliance checks
+  spark_session.py       # SparkSession factory (local mode, Java 17 config)
+  bronze.py              # Bronze layer: read raw files into DataFrames
+  silver.py              # Silver layer: reconcile into one row per (account, phone)
+  gold.py                # Gold layer: phone_consent table and can_send_sms API
+  run_bronze.py          # Bronze pipeline runner
+  run_silver.py          # Silver pipeline runner with summary stats
+  run_gold.py            # Gold pipeline runner with compliance checks
 tests/
-  conftest.py        # Shared fixtures (SparkSession, Bronze + Silver sample data)
-  test_bronze.py     # Bronze schema, column, type, and file-date parsing tests (14)
-  test_silver.py     # Silver dedup, deletes, merging, enrollment, independence (31)
-  test_gold.py       # Gold normalization, consent, can_send_sms compliance (21)
-data/                # Full generated dataset (gitignored)
-data_sample/         # Gzipped subset for local dev (gitignored)
-data_preview/        # Extracted CSVs for manual inspection (gitignored)
+  conftest.py            # Shared fixtures, SparkSession, E2E data options
+  test_bronze.py         # Bronze schema, columns, types, file-date parsing (14)
+  test_silver.py         # Silver dedup, deletes, merging, tie-breaking (32)
+  test_gold.py           # Gold normalization, consent, can_send_sms (25)
+  test_integration.py    # Cross-layer contracts, idempotency, full pipeline (8)
+  test_e2e.py            # Data quality and business logic at scale (11)
+generate_bank_data.py    # Full dataset generator (configurable size/seed)
+generate_sample_data.py  # Sample data + preview generator for local dev
+data/                    # Full generated dataset (gitignored)
+data_sample/             # Gzipped sample for PySpark (gitignored)
+data_preview/            # Extracted CSVs for inspection (gitignored)
 ```

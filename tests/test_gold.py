@@ -148,9 +148,17 @@ class TestBuildPhoneConsentTable:
         assert row["is_deleted"] is False
         assert row["has_sms_consent"] is None
 
+    def test_supplfwd_tie_breaking_in_output(self, spark, silver_sample_data_dir):
+        gold = _build_gold(spark, silver_sample_data_dir)
+        # G1: SUPPLFWD won the same-date tie → CLIENT source, consent=N→False
+        row = _lookup(gold, {"phone_number": "+15557777777"})
+        assert row["phone_source"] == "CLIENT"
+        assert row["has_sms_consent"] is False
+        assert row["is_deleted"] is False
+
     def test_total_row_count(self, spark, silver_sample_data_dir):
         gold = _build_gold(spark, silver_sample_data_dir)
-        assert gold.count() == 7
+        assert gold.count() == 8
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +207,11 @@ class TestCanSendSms:
         assert can_send_sms(gold, "3333333333333333", "+15554444444") is True
         # F1 (account F): OTHER, hard-deleted → False
         assert can_send_sms(gold, "6666666666666666", "+15554444444") is False
+
+    def test_consent_withdrawn_via_tie_breaking(self, spark, silver_sample_data_dir):
+        """G1: CLIENT, not deleted, consent=False (SUPPLFWD won same-date tie) → False."""
+        gold = self._get_consent_table(spark, silver_sample_data_dir)
+        assert can_send_sms(gold, "7777777777777777", "+15557777777") is False
 
     def test_nonexistent_phone_returns_false(self, spark, silver_sample_data_dir):
         """Lookup for a phone that doesn't exist → False."""

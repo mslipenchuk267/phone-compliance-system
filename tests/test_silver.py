@@ -66,16 +66,15 @@ class TestDeriveAccountNumber:
 class TestDedupNonfin:
     def test_removes_duplicates_within_snapshot(self, spark, silver_sample_data_dir):
         nonfin = ingest_nonfin(spark, str(silver_sample_data_dir))
-        # Manually check count before dedup (should have no dupes in fixture,
-        # but verify dedup returns same count)
         original_count = nonfin.count()
         deduped = dedup_nonfin(nonfin)
-        assert deduped.count() == original_count
+        # Fixture has 1 duplicate A2 in snapshot 1 (same phn_id + file_date) → dedup removes it
+        assert deduped.count() == original_count - 1
 
     def test_preserves_across_snapshots(self, spark, silver_sample_data_dir):
         nonfin = ingest_nonfin(spark, str(silver_sample_data_dir))
         deduped = dedup_nonfin(nonfin)
-        # Phone aaa2-0001 appears in all 3 snapshots
+        # Phone aaa2-0001 appears in all 3 snapshots (snapshot 1 dupe removed by dedup)
         a2_count = deduped.filter(F.col("cnsmr_phn_id") == "aaa2-0001").count()
         assert a2_count == 3
 
@@ -86,11 +85,19 @@ class TestDedupNonfin:
 
 
 class TestDedupSupplfwd:
-    def test_preserves_different_dates(self, spark, silver_sample_data_dir):
+    def test_removes_duplicates_same_key(self, spark, silver_sample_data_dir):
+        supplfwd = ingest_supplfwd(spark, str(silver_sample_data_dir))
+        original_count = supplfwd.count()
+        deduped = dedup_supplfwd(supplfwd)
+        # Fixture has 1 duplicate D1 (same legacy_id + phone + record_date) → dedup removes it
+        assert deduped.count() == original_count - 1
+
+    def test_preserves_records_with_different_keys(self, spark, silver_sample_data_dir):
         supplfwd = ingest_supplfwd(spark, str(silver_sample_data_dir))
         deduped = dedup_supplfwd(supplfwd)
-        # All fixture SUPPLFWD records have unique (legacy_id, phone, record_date)
-        assert deduped.count() == supplfwd.count()
+        # Each unique (legacy_id, phone) pair should still be present after dedup
+        distinct_phones = deduped.select("cnsmr_phn_nmbr_txt").distinct().count()
+        assert distinct_phones == 4  # B1, C1, D1, G1
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +212,14 @@ class TestMergeNonfinAndSupplfwd:
         row = _lookup(merged, {"phone_number": "5555555555"})
         assert row["record_source"] == "SUPPLFWD"
 
+    def test_supplfwd_wins_on_date_tie(self, spark, silver_sample_data_dir):
+        merged = self._get_merged(spark, silver_sample_data_dir)
+        # G1: NON-FIN date=2019-03-01, SUPPLFWD date=2019-03-01 → SUPPLFWD wins tie
+        row = _lookup(merged, {"phone_number": "5557777777"})
+        assert row["record_source"] == "SUPPLFWD"
+        assert row["phone_source"] == "CLIENT"  # SUPPLFWD value; NON-FIN had CONSUMER
+        assert row["consent_flag"] == "N"  # SUPPLFWD value; NON-FIN had Y
+
 
 # ---------------------------------------------------------------------------
 # TestBuildSilverTable
@@ -318,7 +333,16 @@ class TestBuildSilverTable:
         assert f1["delete_type"] == "hard_delete"
         assert f1["phone_source"] == "OTHER"
 
+    def test_supplfwd_wins_date_tie(self, spark, silver_sample_data_dir):
+        silver = self._get_silver(spark, silver_sample_data_dir)
+        # G1: both sources have event_date 2019-03-01, SUPPLFWD wins
+        row = _lookup(silver, {"phone_number": "5557777777"})
+        assert row["record_source"] == "SUPPLFWD"
+        assert row["phone_source"] == "CLIENT"
+        assert row["consent_flag"] == "N"
+        assert row["is_deleted"] is False
+
     def test_total_row_count(self, spark, silver_sample_data_dir):
         silver = self._get_silver(spark, silver_sample_data_dir)
-        # 7 unique (account, phone) pairs: A1, A2, B1, C1, D1, E1, F1
-        assert silver.count() == 7
+        # 8 unique (account, phone) pairs: A1, A2, B1, C1, D1, E1, F1, G1
+        assert silver.count() == 8
