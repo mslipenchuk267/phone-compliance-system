@@ -418,17 +418,27 @@ A `Dockerfile` and ECR repository are included in this project. For production w
 
 #### Real-time API
 
-**Approach**: The Gold Delta table is queryable via Databricks SQL Warehouse, meeting the <5s query requirement. For sub-100ms lookups, a DynamoDB + Lambda serving layer is the documented stretch goal.
+**Approach**: The Gold Delta table is queryable via Databricks SQL Warehouse, meeting the <5s query requirement. A benchmark script (`tests/benchmark_can_send_sms.py`) validates this by running the `can_send_sms` SQL query against real data.
+
+For sub-100ms lookups, the Gold table can be cached in an in-memory serving layer:
+
+| Option | Latency | Tradeoff |
+|--------|---------|----------|
+| **Redis / ElastiCache** | <1ms | Load Gold table as `(account_number, phone_number) → can_send_sms` hash map. Invalidate on pipeline completion via a post-Gold webhook or Delta CDF consumer. Simple, fast, but cache staleness is possible between pipeline runs. |
+| **DynamoDB** | 1-5ms | Same key-value pattern, but durable and serverless. Sync via Lambda consuming Delta CDF. More infrastructure, but no cache invalidation to manage — writes are idempotent upserts. |
+| **Application-level cache** | <1ms | Load the full Gold table into a Lambda/container's memory at startup (~500K rows fits in <100MB). Refresh on a schedule or trigger. Simplest option for small-to-medium datasets, but doesn't scale past a few million rows. |
+
+All three options use the same access pattern: the Gold `can_send_sms` result is a pure function of `(account_number, phone_number)`, making it ideal for key-value caching. The Gold Delta table remains the source of truth — the cache is a read-through optimization.
 
 **Pros**:
-- Zero additional infrastructure — queries run directly against the Gold Delta table with no sync pipelines or caches to maintain
-- SQL Warehouse warm queries return in <2s, sufficient for batch compliance checks and internal dashboards
-- Natural upgrade path: DynamoDB serving layer can be added later without changing the pipeline — Gold Delta remains the source of truth
+- SQL Warehouse warm queries return in <2s with zero additional infrastructure, sufficient for batch compliance checks and internal dashboards
+- Natural upgrade path: any caching layer can be added without changing the pipeline — Gold Delta remains the source of truth
+- The `can_send_sms` access pattern (single key-value lookup, read-heavy, infrequent writes) is ideally suited for caching
 
 **Cons**:
-- SQL Warehouse cold-start latency is 5-10s (serverless warehouse spin-up), which is unacceptable for customer-facing API calls
-- Not viable for sub-100ms SLAs — a DynamoDB + Lambda serving layer would be needed, introducing a CDC sync pipeline (Delta CDF to DynamoDB via Lambda or Kinesis), new failure modes, consistency lag, and additional AWS costs
-- An alternative serving option — Redis/ElastiCache — would offer sub-millisecond lookups but adds cache invalidation complexity and lacks DynamoDB's built-in durability. DynamoDB was chosen as the target design because the access pattern is a simple key-value lookup (`account_number + phone_number` to `can_send_sms`)
+- SQL Warehouse cold-start latency is 5-10s (serverless warehouse spin-up), which is unacceptable for customer-facing API calls — a caching layer is required for production use
+- All caching options introduce consistency lag between pipeline completion and cache refresh. For this use case (daily batch pipeline), staleness of minutes is acceptable
+- DynamoDB/Redis add AWS infrastructure costs and operational overhead (monitoring, capacity planning). The application-level cache avoids this but requires careful memory management
 
 ---
 
