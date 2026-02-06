@@ -357,6 +357,24 @@ Delta Live Tables would be a natural fit for a medallion pipeline — it manages
 
 For a production system where the pipeline will only run on Databricks, DLT is worth adopting — particularly for its built-in expectations (replacing `data_quality.py`) and automatic dependency resolution between tables.
 
+#### Single-node cluster
+
+The pipeline was originally configured with 2 workers (`num_workers = 2` in `variables.tf`) but was scaled down to a single-node cluster (`num_workers = 0` in `databricks.tf`) to minimize cluster startup time and simplify iteration during development. On the free-trial workspace, a single-node cluster spins up in ~90 seconds vs 3-5 minutes for a multi-node cluster, which made the deploy-test feedback loop significantly faster given time constraints.
+
+To scale for the full 1GB+ dataset (5GB+ uncompressed), increase `num_workers` in `infra/variables.tf`:
+
+```hcl
+variable "num_workers" {
+  default = 4   # 4x i3.xlarge workers = 128GB RAM, 16 cores
+}
+```
+
+No pipeline code changes are needed — PySpark handles the distribution automatically. The key scaling considerations are:
+
+- **Bronze**: I/O-bound (reading hundreds of gzipped CSVs from S3). More workers add more read parallelism. The `spark.sql.shuffle.partitions` setting may need tuning (default 200) to match the cluster size.
+- **Silver**: Shuffle-heavy (window functions for dedup, joins for hard/soft delete detection). Benefits most from additional workers and memory. For very large datasets, consider increasing `spark.sql.shuffle.partitions` to `2 * num_cores`.
+- **Gold**: Scales trivially — it performs only narrow (non-shuffle) transformations on the Silver output: string concatenation for phone normalization (`+1` prefix) and a `CASE WHEN` for consent derivation. No joins, no aggregations, no window functions. The row count is 1:1 with Silver, so Gold inherits Silver's partitioning and runs as a single-stage map operation across all workers with no data movement between nodes.
+
 #### Why ECR / Docker is not used <a id="container-services-docker"></a>
 
 A Docker-based deployment (custom image from ECR via Databricks Container Services) was attempted but encountered multiple blockers on the free-trial workspace:
