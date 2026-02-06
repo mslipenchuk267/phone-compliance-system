@@ -3,6 +3,15 @@ name = "phone-compliance-system"
 version = "0.1.0"
 description = "Data Engineering Challenge: Client Phone Consent System"
 requires-python = ">=3.9"
+dependencies = [
+    "pyspark>=3.5,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["pipeline*", "tests*"]
 
 [build-system]
 requires = ["setuptools>=61.0"]

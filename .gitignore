@@ -1,5 +1,7 @@
 # Directories to ignore
 data/
+data_sample/
+data_preview/
 sample_solution/
 
 # OS files
@@ -10,3 +12,7 @@ sample_solution/
 
 # Build files
 *.egg-info/
+*__pycache__/
+
+# Claude
+.claude/
