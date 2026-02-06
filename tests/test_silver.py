@@ -297,7 +297,28 @@ class TestBuildSilverTable:
         assert row["consent_flag"] == "Y"
         assert row["account_number"] == "4444444444444444"
 
+    def test_enrollment_only_phone(self, spark, silver_sample_data_dir):
+        silver = self._get_silver(spark, silver_sample_data_dir)
+        # E1 — only in ENRLMT, never in NON-FIN or SUPPLFWD
+        row = _lookup(silver, {"phone_number": "5556666666"})
+        assert row["account_number"] == "5555555555555555"
+        assert row["is_deleted"] is False
+        assert row["record_source"] == "ENRLMT"
+        assert row["phone_source"] == "CLIENT"
+
+    def test_same_phone_different_accounts(self, spark, silver_sample_data_dir):
+        silver = self._get_silver(spark, silver_sample_data_dir)
+        # C1 (account C, phone 5554444444) — re-added, not deleted
+        c1 = _lookup(silver, {"account_number": "3333333333333333", "phone_number": "5554444444"})
+        assert c1["is_deleted"] is False
+        assert c1["phone_source"] == "CLIENT"
+        # F1 (account F, same phone 5554444444) — hard deleted
+        f1 = _lookup(silver, {"account_number": "6666666666666666", "phone_number": "5554444444"})
+        assert f1["is_deleted"] is True
+        assert f1["delete_type"] == "hard_delete"
+        assert f1["phone_source"] == "OTHER"
+
     def test_total_row_count(self, spark, silver_sample_data_dir):
         silver = self._get_silver(spark, silver_sample_data_dir)
-        # 5 unique (account, phone) pairs: A1, A2, B1, C1, D1
-        assert silver.count() == 5
+        # 7 unique (account, phone) pairs: A1, A2, B1, C1, D1, E1, F1
+        assert silver.count() == 7

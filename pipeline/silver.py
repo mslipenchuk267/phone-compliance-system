@@ -150,6 +150,25 @@ def merge_nonfin_and_supplfwd(
     )
 
 
+def _normalize_enrollment(enrollment_df: DataFrame) -> DataFrame:
+    """Normalize enrollment records into the common merge schema."""
+    return enrollment_df.select(
+        F.col("consumer_legacy_identifier").alias("legacy_identifier"),
+        F.col("phone_number"),
+        F.lit(None).cast("string").alias("phone_id"),
+        F.col("phone_type"),
+        F.col("phone_status"),
+        F.col("phone_source"),
+        F.col("phone_technology"),
+        F.col("quality_score"),
+        F.lit(None).cast("string").alias("consent_flag"),
+        F.lit(None).cast("date").alias("consent_date"),
+        F.to_date("enrollment_date", "yyyy-MM-dd").alias("event_date"),
+        F.lit(None).cast("string").alias("soft_delete_flag"),
+        F.lit("ENRLMT").alias("record_source"),
+    )
+
+
 def build_silver_table(
     nonfin_df: DataFrame,
     supplfwd_df: DataFrame,
@@ -173,8 +192,25 @@ def build_silver_table(
     latest_nonfin = get_latest_nonfin_state(nonfin_deduped)
     latest_supplfwd = get_latest_supplfwd_state(supplfwd_deduped)
 
-    # Step 5: Merge into unified record
+    # Step 5: Merge NON-FIN and SUPPLFWD into unified record
     merged = merge_nonfin_and_supplfwd(latest_nonfin, latest_supplfwd)
+
+    # Step 5b: Include enrollment-only phones (not already in NON-FIN or SUPPLFWD)
+    enrl_normalized = _normalize_enrollment(enrollment_df)
+    enrl_window = Window.partitionBy("legacy_identifier", "phone_number").orderBy(
+        F.col("event_date").desc()
+    )
+    latest_enrl = (
+        enrl_normalized.withColumn("_rn", F.row_number().over(enrl_window))
+        .filter(F.col("_rn") == 1)
+        .drop("_rn")
+    )
+    enrl_only = latest_enrl.join(
+        merged.select("legacy_identifier", "phone_number"),
+        on=["legacy_identifier", "phone_number"],
+        how="left_anti",
+    )
+    merged = merged.unionByName(enrl_only)
 
     # Step 6: Join hard-delete info
     merged = merged.join(

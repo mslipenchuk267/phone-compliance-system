@@ -149,6 +149,12 @@ def silver_sample_data_dir(tmp_path):
 
       Account D (4444444444444444P) — 1 phone
         D1 (5555555555): Only in SUPPLFWD, never in NON-FIN → not deleted, SUPPLFWD source
+
+      Account E (5555555555555555P) — 1 phone
+        E1 (5556666666): Only in ENRLMT, never in NON-FIN or SUPPLFWD → enrollment-only
+
+      Account F (6666666666666666P) — 1 phone
+        F1 (5554444444): Same phone as C1 but different account; in snapshots 1,2 NOT 3 → hard delete
     """
     maint = tmp_path / "MAINTENANCE"
     enrl = tmp_path / "ENROLLMENT"
@@ -166,6 +172,8 @@ def silver_sample_data_dir(tmp_path):
             "bbb1-0001|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|ACTIVE|THIRD_PARTY|WIRELESS|70||",
             # C1 — present (will be soft-deleted then re-added)
             "ccc1-0001|3333333333333333P|AGN000003|333333333|Carol|Davis|5554444444|WORK|ACTIVE|CLIENT|VOIP|60||",
+            # F1 — same phone as C1, different account (will be hard deleted)
+            "fff1-0001|6666666666666666P|AGN000006|666666666|Eve|Taylor|5554444444|HOME|ACTIVE|OTHER|LANDLINE|50||",
         ],
     )
 
@@ -181,6 +189,8 @@ def silver_sample_data_dir(tmp_path):
             # B1 — still present
             "bbb1-0001|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|ACTIVE|THIRD_PARTY|WIRELESS|70||",
             # C1 — ABSENT (soft-deleted between snap 1 and 2, will re-appear in snap 3)
+            # F1 — still present (will disappear in snap 3 → hard delete)
+            "fff1-0001|6666666666666666P|AGN000006|666666666|Eve|Taylor|5554444444|HOME|ACTIVE|OTHER|LANDLINE|50||",
         ],
     )
 
@@ -232,6 +242,8 @@ def silver_sample_data_dir(tmp_path):
             "2222222222222222|2222222222222222P|AGN000002|222222222|Bob|Jones|5553333333|CELL|WIRELESS|ACTIVE|THIRD_PARTY|70|2019-01-01",
             "3333333333333333|3333333333333333P|AGN000003|333333333|Carol|Davis|5554444444|WORK|VOIP|ACTIVE|CLIENT|60|2019-01-01",
             "4444444444444444|4444444444444444P|AGN000004|444444444|Dan|Wilson|5555555555|CELL|WIRELESS|ACTIVE|CLIENT|95|2019-01-01",
+            "5555555555555555|5555555555555555P|AGN000005|555555555|Emily|Brown|5556666666|CELL|WIRELESS|ACTIVE|CLIENT|88|2019-01-01",
+            "6666666666666666|6666666666666666P|AGN000006|666666666|Eve|Taylor|5554444444|HOME|LANDLINE|ACTIVE|OTHER|50|2019-01-01",
         ],
     )
 
